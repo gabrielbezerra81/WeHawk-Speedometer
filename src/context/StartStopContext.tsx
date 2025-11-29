@@ -1,9 +1,11 @@
 import { PropsWithChildren, useEffect, useRef, useState } from "react";
 import { createContext } from "use-context-selector";
 
-import * as Location from "expo-location";
-
 type CurrentRouteStatus = "running" | "paused" | "stopped";
+
+import Geolocation, {
+  GeolocationResponse,
+} from "@react-native-community/geolocation";
 
 interface Route {
   id: number;
@@ -11,7 +13,7 @@ interface Route {
   startTime: number;
   endTime: number;
   maxSpeed: number;
-  locations: Array<Location.LocationObject>;
+  locations: Array<GeolocationResponse>;
   stoppedTime: number;
   distance: number;
   meanSpeed: number;
@@ -45,15 +47,13 @@ const StartStopProvider: React.FC<PropsWithChildren> = ({ children }) => {
   const [stoppedTime, setStoppedTime] = useState(0);
 
   const [startLocation, setStartLocation] =
-    useState<Location.LocationObject | null>(null);
+    useState<GeolocationResponse | null>(null);
   const [latestLocation, setLatestLocation] =
-    useState<Location.LocationObject | null>(null);
-  const [locations, setLocations] = useState<Array<Location.LocationObject>>(
-    [],
-  );
+    useState<GeolocationResponse | null>(null);
+  const [locations, setLocations] = useState<Array<GeolocationResponse>>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  const subscriptionRef = useRef<Location.LocationSubscription | null>(null);
+  const subscriptionRef = useRef<number | null>(null);
 
   const [routesHistory, setRoutesHistory] = useState<Route[]>([]);
 
@@ -120,7 +120,7 @@ const StartStopProvider: React.FC<PropsWithChildren> = ({ children }) => {
         meanSpeed,
       };
 
-      console.log(route);
+      console.log("route", route);
 
       setRoutesHistory((history) => [...history, route]);
     }
@@ -131,56 +131,50 @@ const StartStopProvider: React.FC<PropsWithChildren> = ({ children }) => {
     setMaxSpeed(null);
     setStoppedTime(0);
     setLocations([]);
+    setStartLocation(null);
   };
 
   // get initial and start tracking
   useEffect(() => {
     async function getInitialLocation() {
-      try {
-        let { status } = await Location.requestForegroundPermissionsAsync();
-        console.log("status", status);
-        if (status !== "granted") {
+      Geolocation.requestAuthorization(
+        () => {
+          Geolocation.getCurrentPosition(
+            (position) => {
+              setStartLocation(position);
+            },
+            (error) => {
+              console.log("get position error", error);
+            },
+            { enableHighAccuracy: true },
+          );
+        },
+        (error) => {
+          console.log("request location error", error);
           setErrorMsg("A permissão para acessar a localização foi negada");
-          return;
-        }
-
-        const initial = await Location.getCurrentPositionAsync({
-          accuracy: Location.Accuracy.Balanced,
-        });
-
-        console.log("initial", initial);
-
-        setStartLocation(initial);
-      } catch (error) {
-        console.log("location error", JSON.stringify(error));
-      }
+        },
+      );
     }
 
     async function startInitialTracking() {
-      const subscription = await Location.watchPositionAsync(
-        {
-          accuracy: Location.Accuracy.Balanced,
-          timeInterval: 100,
-        },
+      subscriptionRef.current = Geolocation.watchPosition(
         (latest) => {
-          console.log("latest", latest.coords);
+          console.log("latest", latest);
           setLatestLocation(latest);
         },
+        (error) => {
+          console.log("watch error", error);
+        },
+        { interval: 100, enableHighAccuracy: true, distanceFilter: 1 },
       );
-
-      subscriptionRef.current = subscription;
     }
 
-    setTimeout(() => {
-      getInitialLocation();
-    }, 500);
-    setTimeout(() => {
-      startInitialTracking();
-    }, 1000);
+    getInitialLocation();
+    startInitialTracking();
 
     return () => {
       if (subscriptionRef.current) {
-        subscriptionRef.current.remove();
+        Geolocation.clearWatch(subscriptionRef.current);
       }
     };
   }, []);
@@ -188,7 +182,13 @@ const StartStopProvider: React.FC<PropsWithChildren> = ({ children }) => {
   // add new locations when running
   useEffect(() => {
     if (status === "running" && latestLocation) {
-      locations.push(latestLocation);
+      setLocations((loc) => {
+        if (loc.some((item) => item.timestamp === latestLocation.timestamp)) {
+          return loc;
+        }
+
+        return [...loc, latestLocation];
+      });
     }
   }, [latestLocation, status]);
 
@@ -204,8 +204,6 @@ const StartStopProvider: React.FC<PropsWithChildren> = ({ children }) => {
     handleStop,
   };
 
-  console.log("errorMsg", errorMsg);
-
   return (
     <StartStopContext.Provider value={value}>
       {children}
@@ -215,11 +213,11 @@ const StartStopProvider: React.FC<PropsWithChildren> = ({ children }) => {
 
 export default StartStopProvider;
 
-function calculateDistance(locations: Array<Location.LocationObject>): number {
+function calculateDistance(locations: Array<GeolocationResponse>): number {
   let distance = 0;
 
   distance = locations.reduce((distSum, curr, index, list) => {
-    const next: Location.LocationObject | undefined = list?.[index + 1];
+    const next: GeolocationResponse | undefined = list?.[index + 1];
 
     if (!next) {
       return distSum;
@@ -239,12 +237,14 @@ function calculateDistance(locations: Array<Location.LocationObject>): number {
   return distance;
 }
 
-function calculateMeanSpeed(distance: number, duration: number): number {
-  if (duration === 0) {
+function calculateMeanSpeed(distance: number, durationSeconds: number): number {
+  if (durationSeconds === 0) {
     return 0;
   }
 
-  return +(distance / duration).toFixed(2);
+  const timeInHours = durationSeconds / 60 / 60;
+
+  return +(distance / timeInHours).toFixed(2);
 }
 
 function calculatePointsDistance(
