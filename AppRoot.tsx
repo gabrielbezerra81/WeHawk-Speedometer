@@ -1,10 +1,13 @@
 import App from "./App";
-import StartStopProvider from "./src/context/StartStopContext";
+import LocationProvider from "./src/context/LocationContext";
+import RouteTrackingProvider from "./src/context/RouteTrackingContext";
 
 export default function AppRoot() {
   return (
-    <StartStopProvider>
-      <App />
-    </StartStopProvider>
+    <RouteTrackingProvider>
+      <LocationProvider>
+        <App />
+      </LocationProvider>
+    </RouteTrackingProvider>
   );
 }

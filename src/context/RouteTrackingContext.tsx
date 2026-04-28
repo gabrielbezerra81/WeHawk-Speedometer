@@ -1,6 +1,8 @@
 import { PropsWithChildren, useEffect, useRef, useState } from "react";
 import { createContext } from "use-context-selector";
 
+import AsyncStorage from "@react-native-async-storage/async-storage";
+
 type CurrentRouteStatus = "running" | "paused" | "stopped";
 
 import Geolocation, {
@@ -29,20 +31,29 @@ interface StartStopContextData {
   handleRestart: () => void;
   handlePause: () => void;
   handleStop: () => void;
+  setStartLocation: React.Dispatch<
+    React.SetStateAction<GeolocationResponse | null>
+  >;
+  setLatestLocation: React.Dispatch<
+    React.SetStateAction<GeolocationResponse | null>
+  >;
+  setLocations: React.Dispatch<React.SetStateAction<GeolocationResponse[]>>;
+  latestLocation: GeolocationResponse | null;
+  setMaxSpeed: React.Dispatch<React.SetStateAction<number | null>>;
+  locations: GeolocationResponse[];
 }
 
-export const StartStopContext = createContext<StartStopContextData>(
+export const RouteTrackingContext = createContext<StartStopContextData>(
   {} as {} as StartStopContextData,
 );
 
-const StartStopProvider: React.FC<PropsWithChildren> = ({ children }) => {
+const RouteTrackingProvider: React.FC<PropsWithChildren> = ({ children }) => {
   const timerIdRef = useRef<NodeJS.Timeout | null>(null);
   const [duration, setDuration] = useState(0);
   const [startTime, setStartTime] = useState<number | null>(null);
   const [endTime, setEndTime] = useState<number | null>(null);
 
   const [status, setStatus] = useState<CurrentRouteStatus>("stopped");
-  const [speed, setSpeed] = useState<number | null>(null);
   const [maxSpeed, setMaxSpeed] = useState<number | null>(null);
   const [stoppedTime, setStoppedTime] = useState(0);
 
@@ -51,9 +62,6 @@ const StartStopProvider: React.FC<PropsWithChildren> = ({ children }) => {
   const [latestLocation, setLatestLocation] =
     useState<GeolocationResponse | null>(null);
   const [locations, setLocations] = useState<Array<GeolocationResponse>>([]);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
-
-  const subscriptionRef = useRef<number | null>(null);
 
   const [routesHistory, setRoutesHistory] = useState<Route[]>([]);
 
@@ -106,7 +114,7 @@ const StartStopProvider: React.FC<PropsWithChildren> = ({ children }) => {
     if (startTime && startTime) {
       //true
       const distance = calculateDistance(locations);
-      const meanSpeed = calculateMeanSpeed(distance, duration);
+      const meanSpeed = calculateAvgSpeed(distance, duration);
 
       const route: Route = {
         id: startTime,
@@ -132,65 +140,25 @@ const StartStopProvider: React.FC<PropsWithChildren> = ({ children }) => {
     setStoppedTime(0);
     setLocations([]);
     setStartLocation(null);
+    setLatestLocation(null);
   };
 
-  // get initial and start tracking
+  // load/save routes history
   useEffect(() => {
-    async function getInitialLocation() {
-      Geolocation.requestAuthorization(
-        () => {
-          Geolocation.getCurrentPosition(
-            (position) => {
-              setStartLocation(position);
-            },
-            (error) => {
-              console.log("get position error", error);
-            },
-            { enableHighAccuracy: true },
-          );
-        },
-        (error) => {
-          console.log("request location error", error);
-          setErrorMsg("A permissão para acessar a localização foi negada");
-        },
-      );
+    async function loadRoutesHistory() {
+      const json = await AsyncStorage.getItem(routesHistoryKey);
+
+      if (json) {
+        setRoutesHistory(JSON.parse(json));
+      }
     }
 
-    async function startInitialTracking() {
-      subscriptionRef.current = Geolocation.watchPosition(
-        (latest) => {
-          console.log("latest", latest);
-          setLatestLocation(latest);
-        },
-        (error) => {
-          console.log("watch error", error);
-        },
-        { interval: 100, enableHighAccuracy: true, distanceFilter: 1 },
-      );
-    }
-
-    getInitialLocation();
-    startInitialTracking();
+    loadRoutesHistory();
 
     return () => {
-      if (subscriptionRef.current) {
-        Geolocation.clearWatch(subscriptionRef.current);
-      }
+      AsyncStorage.setItem(routesHistoryKey, JSON.stringify(routesHistory));
     };
   }, []);
-
-  // add new locations when running
-  useEffect(() => {
-    if (status === "running" && latestLocation) {
-      setLocations((loc) => {
-        if (loc.some((item) => item.timestamp === latestLocation.timestamp)) {
-          return loc;
-        }
-
-        return [...loc, latestLocation];
-      });
-    }
-  }, [latestLocation, status]);
 
   const value: StartStopContextData = {
     duration,
@@ -202,18 +170,28 @@ const StartStopProvider: React.FC<PropsWithChildren> = ({ children }) => {
     handleRestart,
     handlePause,
     handleStop,
+    setLocations,
+    setStartLocation,
+    setLatestLocation,
+    latestLocation,
+    setMaxSpeed,
+    locations,
   };
 
   return (
-    <StartStopContext.Provider value={value}>
+    <RouteTrackingContext.Provider value={value}>
       {children}
-    </StartStopContext.Provider>
+    </RouteTrackingContext.Provider>
   );
 };
 
-export default StartStopProvider;
+export default RouteTrackingProvider;
 
-function calculateDistance(locations: Array<GeolocationResponse>): number {
+const routesHistoryKey = "@wehawk-routesHistory";
+
+export function calculateDistance(
+  locations: Array<GeolocationResponse>,
+): number {
   let distance = 0;
 
   distance = locations.reduce((distSum, curr, index, list) => {
@@ -237,7 +215,10 @@ function calculateDistance(locations: Array<GeolocationResponse>): number {
   return distance;
 }
 
-function calculateMeanSpeed(distance: number, durationSeconds: number): number {
+export function calculateAvgSpeed(
+  distance: number,
+  durationSeconds: number,
+): number {
   if (durationSeconds === 0) {
     return 0;
   }
@@ -270,4 +251,47 @@ function calculatePointsDistance(
 
   const distance = R * c; // Distance in kilometers
   return distance;
+}
+
+export function formatSpeed({
+  speed,
+  includeUnit,
+}: {
+  speed: number | null;
+  includeUnit: boolean;
+}) {
+  if (speed === null) {
+    return "--";
+  }
+
+  return (
+    (speed * 3.6).toLocaleString("pt-BR", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }) + (includeUnit ? " km/h" : "")
+  );
+}
+
+export function formatTime(seconds: number) {
+  const hours = Math.trunc(seconds / 3600).toLocaleString(undefined, {
+    minimumIntegerDigits: 2,
+  });
+  const minutes = Math.trunc((seconds % 3600) / 60).toLocaleString(undefined, {
+    minimumIntegerDigits: 2,
+  });
+
+  const remainingSeconds = ((seconds % 3600) % 60).toLocaleString(undefined, {
+    minimumIntegerDigits: 2,
+  });
+
+  return `${hours}:${minutes}:${remainingSeconds}`;
+}
+
+export function formatDistance(distance: number) {
+  return (
+    distance.toLocaleString("pt-BR", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }) + " km"
+  );
 }
